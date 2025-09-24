@@ -1,35 +1,53 @@
 #!/usr/bin/env python3
 import copy
 import datetime
-import dockerhub_api
+
+# dockerhub_api is imported lazily inside get_registry_containers to avoid hard dependency at import time
 import fnmatch
 import json
 import os
-import pprint
 import shutil
 import subprocess
-import sys
 import time
-import traceback
-from packaging.version import Version
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union  # noqa: F401 (may be used by downstream typing)
 
 import logging
 from .l4t_version import (
-    L4T_VERSION, LSB_RELEASES, IS_TEGRA, l4t_version_from_tag, l4t_version_compatible,
-    get_l4t_base, get_cuda_arch, get_cuda_version, get_jetpack_version, get_lsb_release
+    LSB_RELEASES,
+    IS_TEGRA,
+    l4t_version_from_tag,
+    l4t_version_compatible,
+    get_l4t_base,
+    get_cuda_arch,
+    get_cuda_version,
+    get_jetpack_version,
+    get_lsb_release,
 )
 from .logging import (
-    get_log_dir, log_status, log_success, log_status, log_warning, log_debug,
-    log_block, log_info, print_log, pprint_debug, colorize, LogConfig
+    get_log_dir,
+    log_status,
+    log_success,
+    log_warning,
+    log_debug,
+    log_block,
+    log_info,
+    print_log,
+    pprint_debug,
+    LogConfig,
 )
 from .packages import find_package, find_packages, resolve_dependencies, validate_dict
 from .utils import (
-    split_container_name, query_yes_no, needs_sudo, sudo_prefix,
-    get_env, get_dir, get_repo_dir
+    split_container_name,
+    query_yes_no,
+    needs_sudo,
+    sudo_prefix,
+    get_env,
+    get_dir,
+    get_repo_dir,
 )
 
-_NEWLINE_=" \\\n"  # used when building command strings
+_NEWLINE_ = " \\\n"  # used when building command strings
+
 
 def format_time(seconds):
     """Format time in hh:mm:ss format"""
@@ -37,6 +55,7 @@ def format_time(seconds):
     minutes = int((seconds % 3600) // 60)
     seconds = int(seconds % 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
 
 def format_time_minutes(seconds):
     """Format time in mm:ss format, without padding for minutes over 99"""
@@ -46,6 +65,7 @@ def format_time_minutes(seconds):
         return f"{minutes:02d}m{seconds:02d}s"
     else:
         return f"{minutes}m{seconds:02d}s"
+
 
 class BuildTimer:
     def __init__(self):
@@ -62,12 +82,94 @@ class BuildTimer:
         self.stage_start = time.time()
         self.current_stage += 1
 
+
+def _cn_dockerfile_name(dockerfile_path: str) -> str:
+    """Return a '-cn' suffixed Dockerfile path next to the original."""
+    dirname = os.path.dirname(dockerfile_path)
+    filename = os.path.basename(dockerfile_path)
+    root, ext = os.path.splitext(filename)
+    if ext:
+        new_name = f"{root}-cn{ext}"
+    else:
+        new_name = f"{root}-cn"
+    return os.path.join(dirname, new_name)
+
+
+def _inject_cn_mirrors(dockerfile_src: str) -> str:
+    """
+    Create a CN-mirror rewritten Dockerfile next to the original and return its path.
+    Idempotent: if a CN file exists and contains our marker, reuse it.
+    """
+    dst = _cn_dockerfile_name(dockerfile_src)
+
+    try:
+        with open(dockerfile_src, "r") as f:
+            content = f.read()
+    except Exception:
+        return dockerfile_src
+
+    # If already a CN file or already injected, just reuse existing logic
+    if dockerfile_src.endswith("-cn") or "# [CN-MIRROR] start" in content:
+        return dockerfile_src
+
+    lines = content.splitlines()
+
+    # Find first FROM line index (skip YAML header comments)
+    insert_idx = None
+    for i, line in enumerate(lines):
+        if line.strip().upper().startswith("FROM "):
+            insert_idx = i + 1
+            # skip following ARG lines right after FROM to keep them near FROM
+            j = insert_idx
+            while j < len(lines) and lines[j].strip().upper().startswith("ARG "):
+                j += 1
+            insert_idx = j
+            break
+
+    if insert_idx is None:
+        # cannot find FROM, don't modify
+        return dockerfile_src
+
+    mirror_block = [
+        "# [CN-MIRROR] start",
+        "ARG APT_MIRROR",
+        "ARG PIP_INDEX_URL",
+        "ARG PIP_TRUSTED_HOST",
+        "ARG NPM_REGISTRY",
+        "ARG HF_ENDPOINT",
+        "ENV HF_ENDPOINT=${HF_ENDPOINT}",
+        "ENV HF_HUB_ENABLE_HF_TRANSFER=1",
+        'RUN if [ -n "$APT_MIRROR" ] && [ -f /etc/apt/sources.list ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g" /etc/apt/sources.list || true; sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}|g" /etc/apt/sources.list || true; apt-get update || true; fi',
+        "RUN if command -v npm >/dev/null 2>&1; then npm config set registry ${NPM_REGISTRY} || true; fi",
+        'RUN if command -v python3 >/dev/null 2>&1; then python3 -m pip config set global.index-url ${PIP_INDEX_URL} || true; if [ -n "${PIP_TRUSTED_HOST}" ]; then python3 -m pip config set global.trusted-host ${PIP_TRUSTED_HOST} || true; fi; fi',
+        "# [CN-MIRROR] end",
+    ]
+
+    new_lines = lines[:insert_idx] + mirror_block + [""] + lines[insert_idx:]
+    new_content = "\n".join(new_lines) + ("\n" if not content.endswith("\n") else "")
+
+    try:
+        with open(dst, "w") as f:
+            f.write(new_content)
+        return dst
+    except Exception:
+        return dockerfile_src
+
+
 def build_container(
-        name: str='', packages: list=[], base: str=get_l4t_base(),
-        build_flags: str='', build_args: dict=None, simulate: bool=False,
-        skip_packages: list=[], skip_tests: list=[], test_only: list=[],
-        push: str='', no_github_api=False, **kwargs
-    ):
+    name: str = "",
+    packages: list = [],
+    base: str = get_l4t_base(),
+    build_flags: str = "",
+    build_args: dict = None,
+    simulate: bool = False,
+    skip_packages: list = [],
+    skip_tests: list = [],
+    test_only: list = [],
+    push: str = "",
+    no_github_api=False,
+    **kwargs,
+):
     """
     Multi-stage container build that chains together selected packages into one container image.
     For example, `['pytorch', 'tensorflow']` would build a container that had both pytorch and tensorflow in it.
@@ -94,11 +196,10 @@ def build_container(
     build_start_time = time.time()
 
     try:
-
         if isinstance(packages, str):
             packages = [packages]
         elif validate_dict(packages):
-            packages = [packages['name']]
+            packages = [packages["name"]]
         else:
             packages = packages.copy()
 
@@ -127,31 +228,43 @@ def build_container(
         if len(name) == 0:
             name = packages[-1]
             repo_name = packages[-1]
-        elif name.find(':') < 0 and name[-1] == '/':  # they gave a namespace to build under
+        elif (
+            name.find(":") < 0 and name[-1] == "/"
+        ):  # they gave a namespace to build under
             name += packages[-1]
             repo_name = packages[-1]
         else:
-            repo_name = name.split(':')[0].split('/')[-1]
+            repo_name = name.split(":")[0].split("/")[-1]
 
         # add prefix to tag
         last_pkg = find_package(packages[-1])
-        prefix = last_pkg.get('prefix', '')
-        postfix = last_pkg.get('postfix', '')
-        tag_idx = name.find(':')
+        prefix = last_pkg.get("prefix", "")
+        postfix = last_pkg.get("postfix", "")
+        tag_idx = name.find(":")
 
         if prefix:
             if tag_idx >= 0:
-                name = name[:tag_idx+1] + prefix + '-' + name[tag_idx+1:]
+                name = name[: tag_idx + 1] + prefix + "-" + name[tag_idx + 1 :]
             else:
-                name = name + ':' + prefix
+                name = name + ":" + prefix
 
         if postfix:
             name += f"{':' if tag_idx < 0 else '-'}{postfix}"
 
-        log_status(f'<b>BUILDING  {packages}</b>')
+        # Append -cn to the tag if China mirror mode is enabled
+        if kwargs.get("china", False):
+            tag_idx2 = name.find(":")
+            if tag_idx2 >= 0:
+                tag = name[tag_idx2 + 1 :]
+                if not tag.endswith("-cn"):
+                    name = name[: tag_idx2 + 1] + tag + "-cn"
+            else:
+                name = name + ":cn"
+
+        log_status(f"<b>BUILDING  {packages}</b>")
 
         # Add N-second countdown with BUILD_DELAY=N environment variable
-        build_delay = get_env('BUILD_DELAY', default=0, type=int)
+        build_delay = get_env("BUILD_DELAY", default=0, type=int)
 
         if build_delay > 0:
             log_info("Starting build in...")
@@ -161,7 +274,7 @@ def build_container(
 
         # Initialize status bar and clear screen
         terminal = shutil.get_terminal_size(fallback=(80, 24))
-        print(f'\033[1;{terminal.lines-1}r\033[?6l\033[2J\033[H]', end='', flush=True)
+        print(f"\033[1;{terminal.lines - 1}r\033[?6l\033[2J\033[H]", end="", flush=True)
         LogConfig.status = True
 
         # Initialize build timer
@@ -171,77 +284,120 @@ def build_container(
         for idx, package in enumerate(packages):
             pkg = find_package(package)
             # tag this build stage with the sub-package
-            container_name = f"{name}-{package.replace(':','_')}"
+            container_name = f"{name}-{package.replace(':', '_')}"
 
             # generate the logging file (without the extension)
-            log_file = os.path.join(get_log_dir('build'), f"{idx+1:02d}o{len(packages)}_{container_name.replace('/','_')}").replace(':','_')
-            jetpack_version = get_jetpack_version()
-            if 'dockerfile' in pkg:
-                cmd = f"{sudo_prefix()}DOCKER_BUILDKIT=0 docker build --network=host" + _NEWLINE_
+            log_file = os.path.join(
+                get_log_dir("build"),
+                f"{idx + 1:02d}o{len(packages)}_{container_name.replace('/', '_')}",
+            ).replace(":", "_")
+            # jetpack_version is available if needed for downstream use
+            if "dockerfile" in pkg:
+                cmd = (
+                    f"{sudo_prefix()}DOCKER_BUILDKIT=0 docker build --network=host"
+                    + _NEWLINE_
+                )
                 cmd += f"  --tag {container_name}" + _NEWLINE_
+
+                # determine initial dockerfile to use
+                dockerfilepath = os.path.join(pkg["path"], pkg["dockerfile"])
+                dockerfile_to_use = dockerfilepath
+
                 if no_github_api:
-                    dockerfilepath = os.path.join(pkg['path'], pkg['dockerfile'])
-                    with open(dockerfilepath, 'r') as fp:
-                        data = fp.read()
-                        if 'ADD https://api.github.com' in data:
-                            dockerfilepath_minus_github_api = os.path.join(pkg['path'], pkg['dockerfile'] + '.minus-github-api')
-                            os.system(f"cp {dockerfilepath} {dockerfilepath_minus_github_api}")
-                            os.system(f"sed 's|^ADD https://api.github.com|#[minus-github-api]ADD https://api.github.com|' -i {dockerfilepath_minus_github_api}")
-                            cmd += f"  --file {os.path.join(pkg['path'], pkg['dockerfile'] + '.minus-github-api')}" + _NEWLINE_
-                        else:
-                            cmd += f"  --file {os.path.join(pkg['path'], pkg['dockerfile'])}" + _NEWLINE_
-                else:
-                    cmd += f"  --file {os.path.join(pkg['path'], pkg['dockerfile'])}" + _NEWLINE_
+                    try:
+                        with open(dockerfilepath, "r") as fp:
+                            data = fp.read()
+                        if "ADD https://api.github.com" in data:
+                            dockerfilepath_minus_github_api = os.path.join(
+                                pkg["path"], pkg["dockerfile"] + ".minus-github-api"
+                            )
+                            os.system(
+                                f"cp {dockerfilepath} {dockerfilepath_minus_github_api}"
+                            )
+                            os.system(
+                                f"sed 's|^ADD https://api.github.com|#[minus-github-api]ADD https://api.github.com|' -i {dockerfilepath_minus_github_api}"
+                            )
+                            dockerfile_to_use = dockerfilepath_minus_github_api
+                    except Exception:
+                        pass
+
+                # apply China mirror rewrite if requested
+                if kwargs.get("china", False):
+                    dockerfile_to_use = _inject_cn_mirrors(dockerfile_to_use)
+
+                cmd += f"  --file {dockerfile_to_use}" + _NEWLINE_
 
                 cmd += f"  --build-arg BASE_IMAGE={base}" + _NEWLINE_
 
-                if 'build_args' in pkg:
-                    cmd += ''.join([f"  --build-arg {key}=\"{value}\"" + _NEWLINE_ for key, value in pkg['build_args'].items()])
+                if "build_args" in pkg:
+                    cmd += "".join(
+                        [
+                            f'  --build-arg {key}="{value}"' + _NEWLINE_
+                            for key, value in pkg["build_args"].items()
+                        ]
+                    )
 
                 if build_args:
                     for key, value in build_args.items():
                         cmd += f"  --build-arg {key}={value}" + _NEWLINE_
 
-                if 'build_flags' in pkg:
-                    cmd += '  ' + pkg['build_flags'] + _NEWLINE_
+                if "build_flags" in pkg:
+                    cmd += "  " + pkg["build_flags"] + _NEWLINE_
 
                 if build_flags:
-                    cmd += '  ' + build_flags + _NEWLINE_
+                    cmd += "  " + build_flags + _NEWLINE_
 
-                cmd += '   ' + pkg['path']
+                cmd += "   " + pkg["path"]
 
                 log_block(f"<b>> BUILDING  {container_name}</b>", f"<b>{cmd}</b>")
 
                 # Calculate spaces needed to align time to right edge
-                status_text = f"[{idx+1}/{len(packages)}] Building {package} ({container_name})"
+                status_text = (
+                    f"[{idx + 1}/{len(packages)}] Building {package} ({container_name})"
+                )
                 current_time = datetime.datetime.now().strftime("%H:%M:%S")
                 time_text = f"{idx} stages completed in {format_time_minutes(timer.get_elapsed())} at {current_time}"
                 spaces_needed = terminal.columns - len(status_text) - len(time_text)
                 if spaces_needed > 0:
-                    status_text = status_text + ' ' * spaces_needed
+                    status_text = status_text + " " * spaces_needed
                 log_status(f"{status_text}{time_text}")
 
-                cmd += _NEWLINE_ + f"2>&1 | tee {log_file + '.txt'}" + "; exit ${PIPESTATUS[0]}"  # non-tee version:  https://stackoverflow.com/a/34604684
+                cmd += (
+                    _NEWLINE_
+                    + f"2>&1 | tee {log_file + '.txt'}"
+                    + "; exit ${PIPESTATUS[0]}"
+                )  # non-tee version:  https://stackoverflow.com/a/34604684
 
-                with open(log_file + '.sh', 'w') as cmd_file:   # save the build command to a shell script for future reference
-                    cmd_file.write('#!/usr/bin/env bash\n\n')
-                    cmd_file.write(cmd + '\n')
+                with (
+                    open(log_file + ".sh", "w") as cmd_file
+                ):  # save the build command to a shell script for future reference
+                    cmd_file.write("#!/usr/bin/env bash\n\n")
+                    cmd_file.write(cmd + "\n")
 
                 if not simulate:  # remove the line breaks that were added for readability, and set the shell to bash so we can use $PIPESTATUS
-                    status = subprocess.run(cmd.replace(_NEWLINE_, ' '), executable='/bin/bash', shell=True, check=True)
-                    print('')
+                    subprocess.run(
+                        cmd.replace(_NEWLINE_, " "),
+                        executable="/bin/bash",
+                        shell=True,
+                        check=True,
+                    )
+                    print("")
             else:
                 tag_container(base, container_name, simulate)
 
             # run tests on the intermediate container
-            if package not in skip_tests and 'intermediate' not in skip_tests and 'all' not in skip_tests:
+            if (
+                package not in skip_tests
+                and "intermediate" not in skip_tests
+                and "all" not in skip_tests
+            ):
                 if len(test_only) == 0 or package in test_only:
-                    status_text = f"[{idx+1}/{len(packages)}] Testing {package} ({container_name})"
+                    status_text = f"[{idx + 1}/{len(packages)}] Testing {package} ({container_name})"
                     current_time = datetime.datetime.now().strftime("%H:%M:%S")
                     time_text = f"{idx} stages completed in {format_time_minutes(timer.get_elapsed())} at {current_time}"
                     spaces_needed = terminal.columns - len(status_text) - len(time_text)
                     if spaces_needed > 0:
-                        status_text = status_text + ' ' * spaces_needed
+                        status_text = status_text + " " * spaces_needed
                     log_status(f"{status_text}{time_text}")
                     test_container(container_name, pkg, simulate, build_idx=idx)
 
@@ -254,33 +410,45 @@ def build_container(
 
         # re-run tests on final container
         for idx, package in enumerate(packages):
-            if package not in skip_tests and 'all' not in skip_tests:
+            if package not in skip_tests and "all" not in skip_tests:
                 if len(test_only) == 0 or package in test_only:
-                    status_text = f"[{idx+1}/{len(packages)}] Testing {package} ({name})"
+                    status_text = (
+                        f"[{idx + 1}/{len(packages)}] Testing {package} ({name})"
+                    )
                     current_time = datetime.datetime.now().strftime("%H:%M:%S")
                     time_text = f"{idx} stages completed in {format_time_minutes(timer.get_elapsed())} at {current_time}"
                     spaces_needed = terminal.columns - len(status_text) - len(time_text)
                     if spaces_needed > 0:
-                        status_text = status_text + ' ' * spaces_needed
+                        status_text = status_text + " " * spaces_needed
                     log_status(f"{status_text}{time_text}")
                     test_container(name, package, simulate, build_idx=idx)
                     timer.next_stage()
 
         # push container
         if push:
-            log_status(f'Pushing {name}')
+            log_status(f"Pushing {name}")
             name = push_container(name, push, simulate)
 
         # Calculate total build time
         build_end_time = time.time()
         total_duration = build_end_time - build_start_time
 
-        log_success('=====================================================================================')
-        log_success('=====================================================================================')
-        log_success(f'✅ <b>`jetson-containers build {repo_name}`</b> ({name})')
-        log_success(f'⏱️  Total build time: {total_duration:.1f} seconds ({total_duration/60:.1f} minutes)')
-        log_success('=====================================================================================')
-        log_success('=====================================================================================')
+        log_success(
+            "====================================================================================="
+        )
+        log_success(
+            "====================================================================================="
+        )
+        log_success(f"✅ <b>`jetson-containers build {repo_name}`</b> ({name})")
+        log_success(
+            f"⏱️  Total build time: {total_duration:.1f} seconds ({total_duration / 60:.1f} minutes)"
+        )
+        log_success(
+            "====================================================================================="
+        )
+        log_success(
+            "====================================================================================="
+        )
 
         return name
 
@@ -289,23 +457,34 @@ def build_container(
         build_end_time = time.time()
         total_duration = build_end_time - build_start_time
 
-        log_warning('=====================================================================================')
-        log_warning('=====================================================================================')
-        log_warning(f'💣 `jetson-containers build` failed after {total_duration:.1f} seconds ({total_duration/60:.1f} minutes)')
-        log_warning(f'Error: {str(e)}')
-        log_warning('=====================================================================================')
-        log_warning('=====================================================================================')
+        log_warning(
+            "====================================================================================="
+        )
+        log_warning(
+            "====================================================================================="
+        )
+        log_warning(
+            f"💣 `jetson-containers build` failed after {total_duration:.1f} seconds ({total_duration / 60:.1f} minutes)"
+        )
+        log_warning(f"Error: {str(e)}")
+        log_warning(
+            "====================================================================================="
+        )
+        log_warning(
+            "====================================================================================="
+        )
 
         # Re-raise the exception so the calling code knows it failed
         raise
 
+
 def build_containers(
-        name: str='',
-        packages: list=[],
-        skip_packages: list=[],
-        skip_errors: bool=False,
-        **kwargs
-    ):
+    name: str = "",
+    packages: list = [],
+    skip_packages: list = [],
+    skip_errors: bool = False,
+    **kwargs,
+):
     """
     Build separate container images for each of the requested packages (this is typically used in batch building jobs)
     For example, `['pytorch', 'tensorflow']` would build a pytorch container and a tensorflow container.
@@ -324,7 +503,7 @@ def build_containers(
     Returns:
       True if all containers built successfully, or False if there were any errors.
     """
-    status = {} # pass/fail result of each build
+    status = {}  # pass/fail result of each build
 
     if not packages:  # build everything (for testing)
         packages = sorted(find_packages([]).keys())
@@ -338,7 +517,7 @@ def build_containers(
             container_name = name
             print(error)
             if not skip_errors:
-                return False #raise error #sys.exit(os.EX_SOFTWARE)
+                return False  # raise error #sys.exit(os.EX_SOFTWARE)
             status[package] = (container_name, error)
         else:
             status[package] = (container_name, None)
@@ -349,7 +528,7 @@ def build_containers(
         msg = f"   * {package} ({container_name}) {'FAILED' if error else 'SUCCESS'}"
         if error is not None:
             msg += f"  ({error})"
-        print_log(msg, level='error' if error else 'success')
+        print_log(msg, level="error" if error else "success")
 
     for _, error in status.values():
         if error:
@@ -370,7 +549,7 @@ def tag_container(source, target, simulate=False):
         subprocess.run(cmd, shell=True, check=True)
 
 
-def push_container(name, repository='', simulate=False):
+def push_container(name, repository="", simulate=False):
     """
     Push container to a repository or user with 'docker push'
 
@@ -384,13 +563,13 @@ def push_container(name, repository='', simulate=False):
     cmd = ""
 
     if repository:
-        namespace_idx = name.find('/')
+        namespace_idx = name.find("/")
         local_name = name
 
         if namespace_idx >= 0:
             name = repository + local_name[namespace_idx:]
         else:
-            name = repository + '/' + local_name
+            name = repository + "/" + local_name
 
         cmd += f"{sudo_prefix()}docker rmi {name} ; "
         cmd += f"{sudo_prefix()}docker tag {local_name} {name} && "
@@ -401,7 +580,7 @@ def push_container(name, repository='', simulate=False):
     log_status(f"Pushing {name}")
 
     if not simulate:
-        subprocess.run(cmd, executable='/bin/bash', shell=True, check=True)
+        subprocess.run(cmd, executable="/bin/bash", shell=True, check=True)
         log_success(f"Pushed container {name}\n")
 
     return name
@@ -413,26 +592,29 @@ def test_container(name, package, simulate=False, build_idx=None):
     """
     package = find_package(package)
 
-    if 'test' not in package:
+    if "test" not in package:
         return True
 
-    for idx, test in enumerate(package['test']):
-        test_cmd = test.split(' ')  # test could be a command with arguments
-        test_exe = test_cmd[0]      # just get just the script/executable name
+    for idx, test in enumerate(package["test"]):
+        test_cmd = test.split(" ")  # test could be a command with arguments
+        test_exe = test_cmd[0]  # just get just the script/executable name
         test_ext = os.path.splitext(test_exe)[1]
-        log_file = os.path.join(get_log_dir('test'), f"{build_idx+1:02d}-{idx+1}_{name.replace('/','_')}_{test_exe}").replace(':','_')
+        log_file = os.path.join(
+            get_log_dir("test"),
+            f"{build_idx + 1:02d}-{idx + 1}_{name.replace('/', '_')}_{test_exe}",
+        ).replace(":", "_")
 
         cmd = f"{sudo_prefix()}docker run -t --rm --network=host --privileged "
 
         if IS_TEGRA:
-            cmd += f"--runtime=nvidia" + _NEWLINE_
+            cmd += "--runtime=nvidia" + _NEWLINE_
         else:
-            cmd += f"--gpus=all" + _NEWLINE_
-            cmd += f"  --env NVIDIA_DRIVER_CAPABILITIES=all" + _NEWLINE_
+            cmd += "--gpus=all" + _NEWLINE_
+            cmd += "  --env NVIDIA_DRIVER_CAPABILITIES=all" + _NEWLINE_
 
         cmd += f"  --volume {package['path']}:/test" + _NEWLINE_
         cmd += f"  --volume {get_dir('data')}:/data" + _NEWLINE_
-        cmd += '  ' + name + _NEWLINE_
+        cmd += "  " + name + _NEWLINE_
 
         cmd += "    /bin/bash -c '"
 
@@ -448,19 +630,24 @@ def test_container(name, package, simulate=False, build_idx=None):
         cmd += "'" + _NEWLINE_
         cmd += f"2>&1 | tee {log_file + '.txt'}" + "; exit ${PIPESTATUS[0]}"
 
-        with open(log_file + '.sh', 'w') as cmd_file:
-            cmd_file.write('#!/usr/bin/env bash\n\n')
-            cmd_file.write(cmd + '\n')
+        with open(log_file + ".sh", "w") as cmd_file:
+            cmd_file.write("#!/usr/bin/env bash\n\n")
+            cmd_file.write(cmd + "\n")
 
         if not simulate:  # TODO: return false on errors
-            status = subprocess.run(cmd.replace(_NEWLINE_, ' '), executable='/bin/bash', shell=True, check=True)
-            print('')
+            subprocess.run(
+                cmd.replace(_NEWLINE_, " "),
+                executable="/bin/bash",
+                shell=True,
+                check=True,
+            )
+            print("")
 
     return True
 
 
-_LOCAL_CACHE=[]
-_REGISTRY_CACHE=[]
+_LOCAL_CACHE = []
+_REGISTRY_CACHE = []
 
 
 def get_local_containers():
@@ -484,19 +671,26 @@ def get_local_containers():
     if needs_sudo():
         cmd = ["sudo"] + cmd
 
-    status = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            #capture_output=True, universal_newlines=True,
-                            shell=False, check=True)
+    status = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        # capture_output=True, universal_newlines=True,
+        shell=False,
+        check=True,
+    )
 
-    _LOCAL_CACHE = [json.loads(txt.lstrip("'").rstrip("'"))
-        for txt in status.stdout.decode('ascii').splitlines()]
+    _LOCAL_CACHE = [
+        json.loads(txt.lstrip("'").rstrip("'"))
+        for txt in status.stdout.decode("ascii").splitlines()
+    ]
 
     pprint_debug(_LOCAL_CACHE)
 
     return _LOCAL_CACHE
 
 
-def get_registry_containers(user='dustynv', use_cache=True, **kwargs):
+def get_registry_containers(user="dustynv", use_cache=True, **kwargs):
     """
     Fetch a DockerHub user's public container images/tags.
     Returns a list of dicts with keys like 'namespace', 'name', and 'tags'.
@@ -511,21 +705,27 @@ def get_registry_containers(user='dustynv', use_cache=True, **kwargs):
     if len(_REGISTRY_CACHE) > 0:
         return _REGISTRY_CACHE
 
-    cache_path = kwargs.get('registry_cache',
-        os.environ.get('DOCKERHUB_CACHE',
-            os.path.join(get_dir('data'), 'containers.json')
-    ))
+    cache_path = kwargs.get(
+        "registry_cache",
+        os.environ.get(
+            "DOCKERHUB_CACHE", os.path.join(get_dir("data"), "containers.json")
+        ),
+    )
 
-    has_cache_path = (cache_path != "0" and cache_path.lower() != "off")
-    cache_enabled = (use_cache and has_cache_path)
+    has_cache_path = cache_path != "0" and cache_path.lower() != "off"
+    cache_enabled = use_cache and has_cache_path
 
     if cache_enabled and os.path.isfile(cache_path):
         if time.time() - os.path.getmtime(cache_path) > 600 and os.geteuid() != 0:
             cmd = f"cd {get_repo_dir()} && git fetch origin dev --quiet && git checkout --quiet origin/dev -- {os.path.relpath(cache_path, get_repo_dir())}"
-            status = subprocess.run(cmd, executable='/bin/bash', shell=True, check=False)
+            status = subprocess.run(
+                cmd, executable="/bin/bash", shell=True, check=False
+            )
             if status.returncode != 0:
-                logging.error(f'failed to update container registry cache from GitHub ({cache_path})')
-                logging.error(f'return code {status.returncode} > {cmd}')
+                logging.error(
+                    f"failed to update container registry cache from GitHub ({cache_path})"
+                )
+                logging.error(f"return code {status.returncode} > {cmd}")
 
         with open(cache_path) as cache_file:
             try:
@@ -535,16 +735,27 @@ def get_registry_containers(user='dustynv', use_cache=True, **kwargs):
             except Exception:
                 pass
 
-    hub = dockerhub_api.DockerHub(return_lists=True, token=os.environ.get('DOCKERHUB_TOKEN'))
+    try:
+        import importlib
+
+        dockerhub_api = importlib.import_module("dockerhub_api")
+    except Exception:
+        logging.error("dockerhub_api not available; cannot fetch registry containers.")
+        _REGISTRY_CACHE = []
+        return _REGISTRY_CACHE
+
+    hub = dockerhub_api.DockerHub(
+        return_lists=True, token=os.environ.get("DOCKERHUB_TOKEN")
+    )
     _REGISTRY_CACHE = hub.repositories(user)
 
     for repo in _REGISTRY_CACHE:
-        repo['tags'] = hub.tags(user, repo['name'])
+        repo["tags"] = hub.tags(user, repo["name"])
 
     if not has_cache_path:
-        cache_path = 'data/containers.json'
+        cache_path = "data/containers.json"
 
-    with open(cache_path, 'w') as cache_file:
+    with open(cache_path, "w") as cache_file:
         json.dump(_REGISTRY_CACHE, cache_file, indent=2)
 
     pprint_debug(_REGISTRY_CACHE)
@@ -558,7 +769,7 @@ def find_local_containers(package, return_dicts=False, **kwargs):
     a list of dicts is returned with the full metadata from the Docker engine.
     """
     if isinstance(package, dict):
-        package = package['name']
+        package = package["name"]
 
     namespace, repo, tag = split_container_name(package)
     local_images = get_local_containers()
@@ -567,13 +778,13 @@ def find_local_containers(package, return_dicts=False, **kwargs):
 
     for image in local_images:
         if namespace:
-            if image['Repository'] != f'{namespace}/{repo}':
+            if image["Repository"] != f"{namespace}/{repo}":
                 continue
         else:
-            if image['Repository'].split('/')[-1] != repo:
+            if image["Repository"].split("/")[-1] != repo:
                 continue
 
-        if tag and tag != image['Tag'] and not image['Tag'].startswith(tag + '-'):
+        if tag and tag != image["Tag"] and not image["Tag"].startswith(tag + "-"):
             continue
 
         if return_dicts:
@@ -584,7 +795,9 @@ def find_local_containers(package, return_dicts=False, **kwargs):
     return found_containers
 
 
-def find_registry_containers(package, check_l4t_version=True, return_dicts=False, **kwargs):
+def find_registry_containers(
+    package, check_l4t_version=True, return_dicts=False, **kwargs
+):
     """
     Search DockerHub for container images compatible with the package or container name.
 
@@ -595,7 +808,7 @@ def find_registry_containers(package, check_l4t_version=True, return_dicts=False
     a list of dicts is returned with the full metadata from DockerHub.
     """
     if isinstance(package, dict):
-        package = package['name']
+        package = package["name"]
 
     namespace, repo, tag = split_container_name(package)
     registry_repos = get_registry_containers(**kwargs)
@@ -604,71 +817,94 @@ def find_registry_containers(package, check_l4t_version=True, return_dicts=False
     found_containers = []
 
     for registry_repo in registry_repos:
-        if registry_repo['name'] != repo:
+        if registry_repo["name"] != repo:
             continue
 
         repo_copy = copy.deepcopy(registry_repo)
-        repo_copy['tags'] = []
+        repo_copy["tags"] = []
 
-        for registry_image in registry_repo['tags']:
-            if tag and not (tag == registry_image['name'] or fnmatch.fnmatch(registry_image['name'], tag + '-*')):
+        for registry_image in registry_repo["tags"]:
+            if tag and not (
+                tag == registry_image["name"]
+                or fnmatch.fnmatch(registry_image["name"], tag + "-*")
+            ):
                 continue
 
             if check_l4t_version:
-                if not l4t_version_compatible(l4t_version_from_tag(registry_image['name']), **kwargs):
+                if not l4t_version_compatible(
+                    l4t_version_from_tag(registry_image["name"]), **kwargs
+                ):
                     continue
 
-            repo_copy['tags'].append(copy.deepcopy(registry_image))
+            repo_copy["tags"].append(copy.deepcopy(registry_image))
 
             if not return_dicts:
                 found_containers.append(
                     f"{registry_repo['namespace']}/{registry_repo['name']}:{registry_image['name']}"
                 )
 
-        if return_dicts and len(repo_copy['tags']) > 0:
+        if return_dicts and len(repo_copy["tags"]) > 0:
             found_containers.append(repo_copy)
 
     return found_containers
 
 
-def find_container(package, prefer_sources=['local', 'registry', 'build'], disable_sources=[], quiet=True, **kwargs):
+def find_container(
+    package,
+    prefer_sources=["local", "registry", "build"],
+    disable_sources=[],
+    quiet=True,
+    **kwargs,
+):
     """
     Finds a local or remote container image to run for the given package (returns a string)
     TODO search for other packages that depend on this package if an image isn't available.
     TODO check if the dockerhub image has updated vs local copy, and if so ask user if they want to pull it.
     """
     if isinstance(package, dict):
-        package = package['name']
+        package = package["name"]
 
     namespace, repo, tag = split_container_name(package)
-    log_debug(f"Finding compatible container image for namespace={namespace} repo={repo} tag={tag}")
+    log_debug(
+        f"Finding compatible container image for namespace={namespace} repo={repo} tag={tag}"
+    )
 
     for source in prefer_sources:
         if source in disable_sources:
             continue
 
-        if source == 'local':
+        if source == "local":
             local_images = find_local_containers(package, **kwargs)
 
             if len(local_images) > 0:
                 return local_images[0]
 
-        elif source == 'registry':
-            registry_images = find_registry_containers(package, return_dicts=True, **kwargs)
+        elif source == "registry":
+            registry_images = find_registry_containers(
+                package, return_dicts=True, **kwargs
+            )
 
             if len(registry_images) > 0:
-                img = registry_images[0]  # TODO allow use to select image if there are multiple candidates
-                img_tag = img['tags'][0]
+                img = registry_images[
+                    0
+                ]  # TODO allow use to select image if there are multiple candidates
+                img_tag = img["tags"][0]
                 img_name = f"{img['namespace']}/{img['name']}:{img_tag['name']}"
-                if quiet or query_yes_no(f"\nFound compatible container {img_name} ({img_tag['tag_last_pushed'][:10]}, {img_tag['full_size']/(1024**3):.1f}GB) - would you like to pull it?", default="yes"):
+                if quiet or query_yes_no(
+                    f"\nFound compatible container {img_name} ({img_tag['tag_last_pushed'][:10]}, {img_tag['full_size'] / (1024**3):.1f}GB) - would you like to pull it?",
+                    default="yes",
+                ):
                     return img_name
 
-        elif source == 'build':
-            if not quiet and query_yes_no(f"\nCouldn't find a compatible container for {package}, would you like to build it?"):
-                return build_container('', package) #, simulate=True)
+        elif source == "build":
+            if not quiet and query_yes_no(
+                f"\nCouldn't find a compatible container for {package}, would you like to build it?"
+            ):
+                return build_container("", package)  # , simulate=True)
 
     # compatible container image could not be found
     return None
+
 
 def parse_container_versions(tags, use_defaults=True, **kwargs):
     """
@@ -676,54 +912,60 @@ def parse_container_versions(tags, use_defaults=True, **kwargs):
     This returns a dict of the aformentioned versions (typically from l4t_version.py)
     Missing tags will be filled in with their defaults unless ``use_defaults=False``
     """
-    #from ..packages.ros.version import ROS_PACKAGES
-    ROS_PACKAGES = ['ros_base', 'ros_core', 'desktop']  # TODO add function to import package
+    # from ..packages.ros.version import ROS_PACKAGES
+    ROS_PACKAGES = [
+        "ros_base",
+        "ros_core",
+        "desktop",
+    ]  # TODO add function to import package
 
     container = tags.lower()
 
-    if ':' in tags:
-        tags = tags.split(':')[-1]
+    if ":" in tags:
+        tags = tags.split(":")[-1]
 
-    tags = tags.split('-')
+    tags = tags.split("-")
     data = {}
 
     for x in tags:
         if not x or len(x) == 0:
             continue
-        if len(x) >= 4 and x.startswith('cu') and x[2:].isnumeric():
-            data['CUDA_VERSION'] = f"{float(x[2:])/10:.1f}"
-        elif len(x) >= 3 and x.lower().startswith('r') and x[1:3].isnumeric():
-            data['L4T_VERSION'] = x[1:]
+        if len(x) >= 4 and x.startswith("cu") and x[2:].isnumeric():
+            data["CUDA_VERSION"] = f"{float(x[2:]) / 10:.1f}"
+        elif len(x) >= 3 and x.lower().startswith("r") and x[1:3].isnumeric():
+            data["L4T_VERSION"] = x[1:]
         elif len(x) == 5 and x in LSB_RELEASES:
-            data['LSB_RELEASE'] = x
-        elif 'ros' in container and x in ROS_PACKAGES:
-            data['ROS_PACKAGE'] = x
-        elif 'version' not in data:
-            data['version'] = x
+            data["LSB_RELEASE"] = x
+        elif "ros" in container and x in ROS_PACKAGES:
+            data["ROS_PACKAGE"] = x
+        elif "version" not in data:
+            data["version"] = x
         else:
-            log_info(f"Skipping unknown container tag '{x}' while parsing '{container}'")
+            log_info(
+                f"Skipping unknown container tag '{x}' while parsing '{container}'"
+            )
 
     if not use_defaults:
         return data
 
-    if not 'L4T_VERSION' in data:
+    if "L4T_VERSION" not in data:
         log_warning(f"Missing L4T_VERSION tag from container '{container}'")
         return data
 
-    l4t_version = data['L4T_VERSION']
+    l4t_version = data["L4T_VERSION"]
 
-    data.setdefault('JETPACK_VERSION', get_jetpack_version(l4t_version=l4t_version))
-    data.setdefault('CUDA_VERSION', get_cuda_version(l4t_version=l4t_version))
-    data.setdefault('CUDA_ARCH', get_cuda_arch(l4t_version=l4t_version, format=str))
-    data.setdefault('LSB_RELEASE', get_lsb_release(l4t_version=l4t_version))
+    data.setdefault("JETPACK_VERSION", get_jetpack_version(l4t_version=l4t_version))
+    data.setdefault("CUDA_VERSION", get_cuda_version(l4t_version=l4t_version))
+    data.setdefault("CUDA_ARCH", get_cuda_arch(l4t_version=l4t_version, format=str))
+    data.setdefault("LSB_RELEASE", get_lsb_release(l4t_version=l4t_version))
 
-    if 'ros' in container and 'ROS_PACKAGE' not in data:
+    if "ros" in container and "ROS_PACKAGE" not in data:
         for ros_package in ROS_PACKAGES:
-            if ros_package in container or ros_package.replace('_', '-') in container:
-                data['ROS_PACKAGE'] = ros_package
+            if ros_package in container or ros_package.replace("_", "-") in container:
+                data["ROS_PACKAGE"] = ros_package
                 break
 
-    for k,v in data.items():
+    for k, v in data.items():
         if not v:
             del k
             continue

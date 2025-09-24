@@ -28,41 +28,155 @@ import sys
 import traceback
 
 from jetson_containers import (
-    build_container, build_containers, find_packages, package_search_dirs,
-    cprint, to_bool, log_config, log_error, log_status, log_versions, LogConfig
+    build_container,
+    build_containers,
+    find_packages,
+    package_search_dirs,
+    cprint,
+    to_bool,
+    log_config,
+    log_error,
+    log_status,
+    log_versions,
+    LogConfig,
 )
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('packages', type=str, nargs='*', default=[], help='packages or containers to build (filterable by wildcards)')
+parser.add_argument(
+    "packages",
+    type=str,
+    nargs="*",
+    default=[],
+    help="packages or containers to build (filterable by wildcards)",
+)
 
-parser.add_argument('--name', type=str, default='', help="the name of the output container to build")
-parser.add_argument('--base', type=str, default='', help="the base container to use at the beginning of the build chain (default: l4t-jetpack)")
-parser.add_argument('--multiple', action='store_true', help="the specified packages should be built independently as opposed to chained together")
-parser.add_argument('--build-flags', type=str, default='', help="extra flags to pass to 'docker build' commands")
-parser.add_argument('--build-args', type=str, default='', help="container build arguments (--build-arg) as a string of comma separated key:value pairs")
-parser.add_argument('--use-proxy', action='store_true', help="use the host's proxy envvars for the container build")
-parser.add_argument('--package-dirs', type=str, default='', help="additional package search directories (comma or colon-separated)")
+parser.add_argument(
+    "--name", type=str, default="", help="the name of the output container to build"
+)
+parser.add_argument(
+    "--base",
+    type=str,
+    default="",
+    help="the base container to use at the beginning of the build chain (default: l4t-jetpack)",
+)
+parser.add_argument(
+    "--multiple",
+    action="store_true",
+    help="the specified packages should be built independently as opposed to chained together",
+)
+parser.add_argument(
+    "--build-flags",
+    type=str,
+    default="",
+    help="extra flags to pass to 'docker build' commands",
+)
+parser.add_argument(
+    "--build-args",
+    type=str,
+    default="",
+    help="container build arguments (--build-arg) as a string of comma separated key:value pairs",
+)
+parser.add_argument(
+    "--use-proxy",
+    action="store_true",
+    help="use the host's proxy envvars for the container build",
+)
+parser.add_argument(
+    "--package-dirs",
+    type=str,
+    default="",
+    help="additional package search directories (comma or colon-separated)",
+)
+parser.add_argument(
+    "--china",
+    action="store_true",
+    help="enable China mirror mode: dynamically rewrite Dockerfiles for CN mirrors and append -cn to image tags",
+)
 
-parser.add_argument('--list-packages', action='store_true', help="show the list of packages that were found under the search directories")
-parser.add_argument('--show-packages', action='store_true', help="show info about one or more packages (if none are specified, all will be listed")
-parser.add_argument('--skip-packages', type=str, default='', help="disable certain packages/containers (filterable by wildcards, comma/colon-separated)")
-parser.add_argument('--skip-errors', action='store_true', help="continue building when errors occur (only relevant when --multiple is in use)")
-parser.add_argument('--skip-tests', type=str, default='', help="comma-separated list of package tests to disable ('intermediate' to disable build-stage tests, 'all' to disable all)")
-parser.add_argument('--test-only', type=str, default='', help="only test the specified packages (comma/colon-separated list)")
+parser.add_argument(
+    "--list-packages",
+    action="store_true",
+    help="show the list of packages that were found under the search directories",
+)
+parser.add_argument(
+    "--show-packages",
+    action="store_true",
+    help="show info about one or more packages (if none are specified, all will be listed",
+)
+parser.add_argument(
+    "--skip-packages",
+    type=str,
+    default="",
+    help="disable certain packages/containers (filterable by wildcards, comma/colon-separated)",
+)
+parser.add_argument(
+    "--skip-errors",
+    action="store_true",
+    help="continue building when errors occur (only relevant when --multiple is in use)",
+)
+parser.add_argument(
+    "--skip-tests",
+    type=str,
+    default="",
+    help="comma-separated list of package tests to disable ('intermediate' to disable build-stage tests, 'all' to disable all)",
+)
+parser.add_argument(
+    "--test-only",
+    type=str,
+    default="",
+    help="only test the specified packages (comma/colon-separated list)",
+)
 
-parser.add_argument('--simulate', action='store_true', help="print out the build commands without actually building the containers")
-parser.add_argument('--push', type=str, default='', help="repo or user to push built container image to (no push by default)")
-parser.add_argument('--no-github-api', action='store_true', help="disalbe Github API use to force rebuild on new git commits")
+parser.add_argument(
+    "--simulate",
+    action="store_true",
+    help="print out the build commands without actually building the containers",
+)
+parser.add_argument(
+    "--push",
+    type=str,
+    default="",
+    help="repo or user to push built container image to (no push by default)",
+)
+parser.add_argument(
+    "--no-github-api",
+    action="store_true",
+    help="disalbe Github API use to force rebuild on new git commits",
+)
 
-parser.add_argument('--log-dir', '--logs', type=str, default=None, help="sets the directory to save container build logs to (default: jetson-containers/logs)")
-parser.add_argument('--log-level', type=str, default=None, choices=LogConfig.levels, help="sets the logging verbosity level")
-parser.add_argument('--log-colors', type=to_bool, default=None, help=f"enable/disable terminal colors and formatting (defaults to true)")
-parser.add_argument('--log-status', type=to_bool, default=None, help=f"enable status bar at bottom of terminal (defaults to true)")
+parser.add_argument(
+    "--log-dir",
+    "--logs",
+    type=str,
+    default=None,
+    help="sets the directory to save container build logs to (default: jetson-containers/logs)",
+)
+parser.add_argument(
+    "--log-level",
+    type=str,
+    default=None,
+    choices=LogConfig.levels,
+    help="sets the logging verbosity level",
+)
+parser.add_argument(
+    "--log-colors",
+    type=to_bool,
+    default=None,
+    help="enable/disable terminal colors and formatting (defaults to true)",
+)
+parser.add_argument(
+    "--log-status",
+    type=to_bool,
+    default=None,
+    help="enable status bar at bottom of terminal (defaults to true)",
+)
 
-parser.add_argument('--debug', action='store_true', help="enable debug logging")
-parser.add_argument('--verbose', action='store_true', help="enable verbose logging")
-parser.add_argument('--version', action='store_true', help="print platform version info and exit")
+parser.add_argument("--debug", action="store_true", help="enable debug logging")
+parser.add_argument("--verbose", action="store_true", help="enable verbose logging")
+parser.add_argument(
+    "--version", action="store_true", help="print platform version info and exit"
+)
 
 args = parser.parse_args()
 
@@ -74,14 +188,14 @@ if args.skip_errors and not args.multiple:
     raise ValueError("--skip-errors can only be used with --multiple flag")
 
 # split multi-value keyword arguments
-args.package_dirs = re.split(',|;|:', args.package_dirs)
-args.skip_packages = re.split(',|;|:', args.skip_packages)
-args.skip_tests = re.split(',|;|:', args.skip_tests)
-args.test_only = re.split(',|;|:', args.test_only)
+args.package_dirs = re.split(",|;|:", args.package_dirs)
+args.skip_packages = re.split(",|;|:", args.skip_packages)
+args.skip_tests = re.split(",|;|:", args.skip_tests)
+args.test_only = re.split(",|;|:", args.test_only)
 
-print(f'\n{args}\n')
+print(f"\n{args}\n")
 log_versions()
-cprint(f"\n$ jetson-containers {' '.join(sys.argv[1:])}\n", attrs='bold')
+cprint(f"\n$ jetson-containers {' '.join(sys.argv[1:])}\n", attrs="bold")
 
 if args.version:
     sys.exit()
@@ -89,16 +203,28 @@ if args.version:
 # cast build args into dictionary
 if args.build_args:
     try:
-        key_value_pairs = args.build_args.split(',')
-        args.build_args = {pair.split(':')[0]: pair.split(':', maxsplit=1)[1] for pair in key_value_pairs}
-    except(ValueError, IndexError):
-        raise argparse.ArgumentTypeError("Invalid dictionary format. Use key1:value1, key2:value2 ...")
+        key_value_pairs = args.build_args.split(",")
+        args.build_args = {
+            pair.split(":")[0]: pair.split(":", maxsplit=1)[1]
+            for pair in key_value_pairs
+        }
+    except (ValueError, IndexError):
+        raise argparse.ArgumentTypeError(
+            "Invalid dictionary format. Use key1:value1, key2:value2 ..."
+        )
 else:
     args.build_args = {}
 
 # add proxy to build args if flag is set
 if args.use_proxy:
-    proxy_vars = ['http_proxy', 'https_proxy', 'no_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY']
+    proxy_vars = [
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    ]
     for var in proxy_vars:
         if var in os.environ:
             args.build_args[var] = os.environ[var]
@@ -117,7 +243,7 @@ if args.list_packages or args.show_packages:
 
     if args.show_packages:
         for key in sorted(packages.keys()):
-            fmt = pprint.pformat(packages[key], indent=2)[1:-1].replace('\n', '\n  ')
+            fmt = pprint.pformat(packages[key], indent=2)[1:-1].replace("\n", "\n  ")
             cprint(f"\n<b>> {key}</b>\n\n   {fmt}")
 
     sys.exit(0)
@@ -125,11 +251,35 @@ if args.list_packages or args.show_packages:
 try:
     # build one multi-stage container from chain of packages
     # or launch multiple independent container builds
+    if args.china:
+        # set default mirror build args if they weren't provided
+        args.build_args.setdefault(
+            "APT_MIRROR",
+            os.environ.get("APT_MIRROR", "https://mirrors.tuna.tsinghua.edu.cn/ubuntu"),
+        )
+        args.build_args.setdefault(
+            "PIP_INDEX_URL",
+            os.environ.get("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+        )
+        args.build_args.setdefault(
+            "PIP_TRUSTED_HOST",
+            os.environ.get("PIP_TRUSTED_HOST", "pypi.tuna.tsinghua.edu.cn"),
+        )
+        args.build_args.setdefault(
+            "NPM_REGISTRY",
+            os.environ.get("NPM_REGISTRY", "https://registry.npmmirror.com"),
+        )
+        args.build_args.setdefault(
+            "HF_ENDPOINT", os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        )
+
     if not args.multiple:
         build_container(**vars(args))
     else:
         build_containers(**vars(args))
-except Exception as error:
-    log_error(f"Failed building:  {', '.join(args.packages)}\n\n{traceback.format_exc()}")
+except Exception:
+    log_error(
+        f"Failed building:  {', '.join(args.packages)}\n\n{traceback.format_exc()}"
+    )
 finally:
     log_status(done=True)

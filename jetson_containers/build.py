@@ -288,7 +288,10 @@ try:
         )
         args.build_args.setdefault(
             "GITHUB_PROXY_RAW",
-            os.environ.get("GITHUB_PROXY_RAW", os.environ.get("GITHUB_PROXY", "https://gh-proxy.com/")),
+            os.environ.get(
+                "GITHUB_PROXY_RAW",
+                os.environ.get("GITHUB_PROXY", "https://gh-proxy.com/"),
+            ),
         )
         args.build_args.setdefault(
             "GITHUB_GITCONFIG",

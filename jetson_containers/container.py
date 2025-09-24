@@ -164,41 +164,45 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
     def _rewrite_github_urls(line: str) -> str:
         stripped = line.strip()
         # skip pure comment lines
-        if stripped.startswith('#'):
+        if stripped.startswith("#"):
             return line
 
         # avoid double-proxying if already proxied
         already_tokens = [
-            '${GITHUB_PROXY}', '${GITHUB_PROXY_RAW}',
-            'gh-proxy.com', 'mirror.ghproxy.com', 'github.com.cnpmjs.org',
-            'hub.fgit.ml', 'gh.api.99988866.xyz'
+            "${GITHUB_PROXY}",
+            "${GITHUB_PROXY_RAW}",
+            "gh-proxy.com",
+            "mirror.ghproxy.com",
+            "github.com.cnpmjs.org",
+            "hub.fgit.ml",
+            "gh.api.99988866.xyz",
         ]
         if any(tok in line for tok in already_tokens):
             return line
 
         # 1) Convert SSH/git protocols to HTTPS first
         # git@github.com:user/repo.git -> https://github.com/user/repo.git (with proxy later)
-        line = line.replace('git@github.com:', 'https://github.com/')
+        line = line.replace("git@github.com:", "https://github.com/")
         # ssh://git@github.com/user/repo.git -> https://github.com/user/repo.git
-        line = line.replace('ssh://git@github.com/', 'https://github.com/')
+        line = line.replace("ssh://git@github.com/", "https://github.com/")
         # git://github.com/user/repo.git -> https://github.com/user/repo.git
-        line = line.replace('git://github.com/', 'https://github.com/')
+        line = line.replace("git://github.com/", "https://github.com/")
 
         # 2) Convert github.com/.../blob/<ref>/path to raw URL before proxying
         #    Only apply if we detect a single blob segment to minimize false positives.
-        if 'https://github.com/' in line and '/blob/' in line:
+        if "https://github.com/" in line and "/blob/" in line:
             try:
-                prefix, rest = line.split('https://github.com/', 1)
+                prefix, rest = line.split("https://github.com/", 1)
                 path = rest
                 # Extract first token up to whitespace or quotes to avoid touching trailing args
                 m = re.match(r"([^\s'\"]+)(.*)", path)
                 if m:
                     url_path, tail = m.group(1), m.group(2)
-                    parts = url_path.split('/')
+                    parts = url_path.split("/")
                     # Expect: org/repo/blob/ref/remaining...
-                    if len(parts) >= 5 and parts[2] == 'blob':
+                    if len(parts) >= 5 and parts[2] == "blob":
                         org, repo, _, ref = parts[0], parts[1], parts[2], parts[3]
-                        remaining = '/'.join(parts[4:])
+                        remaining = "/".join(parts[4:])
                         raw_url = f"${{GITHUB_PROXY_RAW}}https://raw.githubusercontent.com/{org}/{repo}/{ref}/{remaining}"
                         line = prefix + raw_url + tail
             except Exception:
@@ -207,20 +211,43 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         # 3) Rewrite common GitHub domains to go through proxies
         # raw contents (raw.githubusercontent.com, gist)
         replacements = [
-            ('http://raw.githubusercontent.com/', '${GITHUB_PROXY_RAW}https://raw.githubusercontent.com/'),
-            ('https://raw.githubusercontent.com/', '${GITHUB_PROXY_RAW}https://raw.githubusercontent.com/'),
-            ('http://gist.githubusercontent.com/', '${GITHUB_PROXY_RAW}https://gist.githubusercontent.com/'),
-            ('https://gist.githubusercontent.com/', '${GITHUB_PROXY_RAW}https://gist.githubusercontent.com/'),
-
+            (
+                "http://raw.githubusercontent.com/",
+                "${GITHUB_PROXY_RAW}https://raw.githubusercontent.com/",
+            ),
+            (
+                "https://raw.githubusercontent.com/",
+                "${GITHUB_PROXY_RAW}https://raw.githubusercontent.com/",
+            ),
+            (
+                "http://gist.githubusercontent.com/",
+                "${GITHUB_PROXY_RAW}https://gist.githubusercontent.com/",
+            ),
+            (
+                "https://gist.githubusercontent.com/",
+                "${GITHUB_PROXY_RAW}https://gist.githubusercontent.com/",
+            ),
             # standard github endpoints (repos, releases, archives, api, codeload, objects)
-            ('http://github.com/', '${GITHUB_PROXY}https://github.com/'),
-            ('https://github.com/', '${GITHUB_PROXY}https://github.com/'),
-            ('http://codeload.github.com/', '${GITHUB_PROXY}https://codeload.github.com/'),
-            ('https://codeload.github.com/', '${GITHUB_PROXY}https://codeload.github.com/'),
-            ('http://objects.githubusercontent.com/', '${GITHUB_PROXY}https://objects.githubusercontent.com/'),
-            ('https://objects.githubusercontent.com/', '${GITHUB_PROXY}https://objects.githubusercontent.com/'),
-            ('http://api.github.com/', '${GITHUB_PROXY}https://api.github.com/'),
-            ('https://api.github.com/', '${GITHUB_PROXY}https://api.github.com/'),
+            ("http://github.com/", "${GITHUB_PROXY}https://github.com/"),
+            ("https://github.com/", "${GITHUB_PROXY}https://github.com/"),
+            (
+                "http://codeload.github.com/",
+                "${GITHUB_PROXY}https://codeload.github.com/",
+            ),
+            (
+                "https://codeload.github.com/",
+                "${GITHUB_PROXY}https://codeload.github.com/",
+            ),
+            (
+                "http://objects.githubusercontent.com/",
+                "${GITHUB_PROXY}https://objects.githubusercontent.com/",
+            ),
+            (
+                "https://objects.githubusercontent.com/",
+                "${GITHUB_PROXY}https://objects.githubusercontent.com/",
+            ),
+            ("http://api.github.com/", "${GITHUB_PROXY}https://api.github.com/"),
+            ("https://api.github.com/", "${GITHUB_PROXY}https://api.github.com/"),
         ]
 
         for src, dst in replacements:

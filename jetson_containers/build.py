@@ -281,6 +281,19 @@ try:
         args.build_args.setdefault(
             "HF_ENDPOINT", os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
         )
+        # GitHub proxy (prefix URL) for git clone/downloads
+        args.build_args.setdefault(
+            "GITHUB_PROXY",
+            os.environ.get("GITHUB_PROXY", "https://gh-proxy.com/"),
+        )
+        args.build_args.setdefault(
+            "GITHUB_PROXY_RAW",
+            os.environ.get("GITHUB_PROXY_RAW", os.environ.get("GITHUB_PROXY", "https://gh-proxy.com/")),
+        )
+        args.build_args.setdefault(
+            "GITHUB_GITCONFIG",
+            os.environ.get("GITHUB_GITCONFIG", "0"),
+        )
 
     if not args.multiple:
         build_container(**vars(args))

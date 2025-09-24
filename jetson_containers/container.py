@@ -7,6 +7,7 @@ import fnmatch
 import json
 import os
 import shutil
+import re
 import subprocess
 import time
 from typing import List, Dict, Any, Union  # noqa: F401 (may be used by downstream typing)
@@ -135,6 +136,9 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         "ARG APT_MIRROR",
         "ARG APT_INSECURE",
         "ARG APT_MIRROR_PORTS",
+        "ARG GITHUB_PROXY",
+        "ARG GITHUB_PROXY_RAW",
+        "ARG GITHUB_GITCONFIG=0",
         "ARG PIP_INDEX_URL",
         "ARG PIP_TRUSTED_HOST",
         "ARG NPM_REGISTRY",
@@ -145,12 +149,91 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         'RUN if echo "${APT_MIRROR}" | grep -qi "^https://"; then apt-get update || true; apt-get install -y --no-install-recommends ca-certificates || true; fi',
         # switch ubuntu archives to mirror in all apt sources (list and deb822)
         'RUN if [ -n "$APT_MIRROR" ]; then files="/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources"; ports_mirror="${APT_MIRROR_PORTS:-$APT_MIRROR}"; for f in $files; do if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|https://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g; s|https://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g" "$f" || true; fi; done; if [ -n "${APT_INSECURE}" ]; then echo "Acquire::https::Verify-Peer false; Acquire::https::Verify-Host false;" > /etc/apt/apt.conf.d/99insecure-certs; fi; apt-get update || true; fi',
+        # optionally configure git to rewrite github.com to proxy prefix for clones
+        'RUN if [ "${GITHUB_GITCONFIG}" = "1" ] && [ -n "${GITHUB_PROXY}" ]; then \
+                git config --global url."${GITHUB_PROXY}https://github.com/".insteadof https://github.com/ || true; \
+                git config --global url."${GITHUB_PROXY}git@github.com:".insteadof git@github.com: || true; \
+                git config --global url."${GITHUB_PROXY}https://codeload.github.com/".insteadof https://codeload.github.com/ || true; \
+            fi',
         "RUN if command -v npm >/dev/null 2>&1; then npm config set registry ${NPM_REGISTRY} || true; fi",
         'RUN if command -v python3 >/dev/null 2>&1; then python3 -m pip config set global.index-url ${PIP_INDEX_URL} || true; if [ -n "${PIP_TRUSTED_HOST}" ]; then python3 -m pip config set global.trusted-host ${PIP_TRUSTED_HOST} || true; fi; fi',
         "# [CN-MIRROR] end",
     ]
 
-    new_lines = lines[:insert_idx] + mirror_block + [""] + lines[insert_idx:]
+    # Rewrite GitHub-related URLs (ADD/RUN/curl/wget/git/pip) to go through proxy and convert SSH to HTTPS
+    def _rewrite_github_urls(line: str) -> str:
+        stripped = line.strip()
+        # skip pure comment lines
+        if stripped.startswith('#'):
+            return line
+
+        # avoid double-proxying if already proxied
+        already_tokens = [
+            '${GITHUB_PROXY}', '${GITHUB_PROXY_RAW}',
+            'gh-proxy.com', 'mirror.ghproxy.com', 'github.com.cnpmjs.org',
+            'hub.fgit.ml', 'gh.api.99988866.xyz'
+        ]
+        if any(tok in line for tok in already_tokens):
+            return line
+
+        # 1) Convert SSH/git protocols to HTTPS first
+        # git@github.com:user/repo.git -> https://github.com/user/repo.git (with proxy later)
+        line = line.replace('git@github.com:', 'https://github.com/')
+        # ssh://git@github.com/user/repo.git -> https://github.com/user/repo.git
+        line = line.replace('ssh://git@github.com/', 'https://github.com/')
+        # git://github.com/user/repo.git -> https://github.com/user/repo.git
+        line = line.replace('git://github.com/', 'https://github.com/')
+
+        # 2) Convert github.com/.../blob/<ref>/path to raw URL before proxying
+        #    Only apply if we detect a single blob segment to minimize false positives.
+        if 'https://github.com/' in line and '/blob/' in line:
+            try:
+                prefix, rest = line.split('https://github.com/', 1)
+                path = rest
+                # Extract first token up to whitespace or quotes to avoid touching trailing args
+                m = re.match(r"([^\s'\"]+)(.*)", path)
+                if m:
+                    url_path, tail = m.group(1), m.group(2)
+                    parts = url_path.split('/')
+                    # Expect: org/repo/blob/ref/remaining...
+                    if len(parts) >= 5 and parts[2] == 'blob':
+                        org, repo, _, ref = parts[0], parts[1], parts[2], parts[3]
+                        remaining = '/'.join(parts[4:])
+                        raw_url = f"${{GITHUB_PROXY_RAW}}https://raw.githubusercontent.com/{org}/{repo}/{ref}/{remaining}"
+                        line = prefix + raw_url + tail
+            except Exception:
+                pass
+
+        # 3) Rewrite common GitHub domains to go through proxies
+        # raw contents (raw.githubusercontent.com, gist)
+        replacements = [
+            ('http://raw.githubusercontent.com/', '${GITHUB_PROXY_RAW}https://raw.githubusercontent.com/'),
+            ('https://raw.githubusercontent.com/', '${GITHUB_PROXY_RAW}https://raw.githubusercontent.com/'),
+            ('http://gist.githubusercontent.com/', '${GITHUB_PROXY_RAW}https://gist.githubusercontent.com/'),
+            ('https://gist.githubusercontent.com/', '${GITHUB_PROXY_RAW}https://gist.githubusercontent.com/'),
+
+            # standard github endpoints (repos, releases, archives, api, codeload, objects)
+            ('http://github.com/', '${GITHUB_PROXY}https://github.com/'),
+            ('https://github.com/', '${GITHUB_PROXY}https://github.com/'),
+            ('http://codeload.github.com/', '${GITHUB_PROXY}https://codeload.github.com/'),
+            ('https://codeload.github.com/', '${GITHUB_PROXY}https://codeload.github.com/'),
+            ('http://objects.githubusercontent.com/', '${GITHUB_PROXY}https://objects.githubusercontent.com/'),
+            ('https://objects.githubusercontent.com/', '${GITHUB_PROXY}https://objects.githubusercontent.com/'),
+            ('http://api.github.com/', '${GITHUB_PROXY}https://api.github.com/'),
+            ('https://api.github.com/', '${GITHUB_PROXY}https://api.github.com/'),
+        ]
+
+        for src, dst in replacements:
+            if dst in line:
+                continue
+            line = line.replace(src, dst)
+
+        return line
+
+    # Apply URL rewriting for all lines after the injection point
+    tail = [_rewrite_github_urls(line) for line in lines[insert_idx:]]
+
+    new_lines = lines[:insert_idx] + mirror_block + [""] + tail
     new_content = "\n".join(new_lines) + ("\n" if not content.endswith("\n") else "")
 
     try:

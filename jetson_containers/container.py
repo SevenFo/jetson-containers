@@ -134,6 +134,7 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         "# [CN-MIRROR] start",
         "ARG APT_MIRROR",
         "ARG APT_INSECURE",
+        "ARG APT_MIRROR_PORTS",
         "ARG PIP_INDEX_URL",
         "ARG PIP_TRUSTED_HOST",
         "ARG NPM_REGISTRY",
@@ -142,17 +143,8 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         "ENV HF_HUB_ENABLE_HF_TRANSFER=1",
         # ensure CA bundle present if using https mirror
         'RUN if echo "${APT_MIRROR}" | grep -qi "^https://"; then apt-get update || true; apt-get install -y --no-install-recommends ca-certificates || true; fi',
-                # switch ubuntu archives to mirror in all apt sources (list and deb822)
-                'RUN if [ -n "$APT_MIRROR" ]; then \
-                            files="/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources"; \
-                            for f in $files; do \
-                                if [ -f "$f" ]; then \
-                                    sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|https://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}|g; s|https://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}|g" "$f" || true; \
-                                fi; \
-                            done; \
-                            if [ -n "${APT_INSECURE}" ]; then echo "Acquire::https::Verify-Peer false; Acquire::https::Verify-Host false;" > /etc/apt/apt.conf.d/99insecure-certs; fi; \
-                            apt-get update || true; \
-                        fi',
+        # switch ubuntu archives to mirror in all apt sources (list and deb822)
+        'RUN if [ -n "$APT_MIRROR" ]; then files="/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources"; ports_mirror="${APT_MIRROR_PORTS:-$APT_MIRROR}"; for f in $files; do if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|https://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g; s|https://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g" "$f" || true; fi; done; if [ -n "${APT_INSECURE}" ]; then echo "Acquire::https::Verify-Peer false; Acquire::https::Verify-Host false;" > /etc/apt/apt.conf.d/99insecure-certs; fi; apt-get update || true; fi',
         "RUN if command -v npm >/dev/null 2>&1; then npm config set registry ${NPM_REGISTRY} || true; fi",
         'RUN if command -v python3 >/dev/null 2>&1; then python3 -m pip config set global.index-url ${PIP_INDEX_URL} || true; if [ -n "${PIP_TRUSTED_HOST}" ]; then python3 -m pip config set global.trusted-host ${PIP_TRUSTED_HOST} || true; fi; fi',
         "# [CN-MIRROR] end",

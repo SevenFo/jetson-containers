@@ -253,10 +253,19 @@ try:
     # or launch multiple independent container builds
     if args.china:
         # set default mirror build args if they weren't provided
+        # Use http by default to avoid TLS CA issues inside minimal base images
         args.build_args.setdefault(
             "APT_MIRROR",
-            os.environ.get("APT_MIRROR", "https://mirrors.tuna.tsinghua.edu.cn/ubuntu"),
+            os.environ.get("APT_MIRROR", "http://mirrors.tuna.tsinghua.edu.cn/ubuntu"),
         )
+        # For ARM (ubuntu-ports), use a ports mirror to avoid 404 on arm64
+        args.build_args.setdefault(
+            "APT_MIRROR_PORTS",
+            os.environ.get(
+                "APT_MIRROR_PORTS", "http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
+            ),
+        )
+        args.build_args.setdefault("APT_INSECURE", os.environ.get("APT_INSECURE", ""))
         args.build_args.setdefault(
             "PIP_INDEX_URL",
             os.environ.get("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple"),
@@ -272,12 +281,6 @@ try:
         args.build_args.setdefault(
             "HF_ENDPOINT", os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
         )
-        # Use http by default to avoid TLS CA issues inside minimal base images
-        args.build_args.setdefault(
-            "APT_MIRROR",
-            os.environ.get("APT_MIRROR", "http://mirrors.tuna.tsinghua.edu.cn/ubuntu"),
-        )
-        args.build_args.setdefault("APT_INSECURE", os.environ.get("APT_INSECURE", ""))
 
     if not args.multiple:
         build_container(**vars(args))

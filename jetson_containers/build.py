@@ -272,6 +272,12 @@ try:
         args.build_args.setdefault(
             "HF_ENDPOINT", os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
         )
+        # Use http by default to avoid TLS CA issues inside minimal base images
+        args.build_args.setdefault(
+            "APT_MIRROR",
+            os.environ.get("APT_MIRROR", "http://mirrors.tuna.tsinghua.edu.cn/ubuntu"),
+        )
+        args.build_args.setdefault("APT_INSECURE", os.environ.get("APT_INSECURE", ""))
 
     if not args.multiple:
         build_container(**vars(args))

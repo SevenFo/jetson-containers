@@ -133,13 +133,17 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
     mirror_block = [
         "# [CN-MIRROR] start",
         "ARG APT_MIRROR",
+        "ARG APT_INSECURE",
         "ARG PIP_INDEX_URL",
         "ARG PIP_TRUSTED_HOST",
         "ARG NPM_REGISTRY",
         "ARG HF_ENDPOINT",
         "ENV HF_ENDPOINT=${HF_ENDPOINT}",
         "ENV HF_HUB_ENABLE_HF_TRANSFER=1",
-        'RUN if [ -n "$APT_MIRROR" ] && [ -f /etc/apt/sources.list ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g" /etc/apt/sources.list || true; sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}|g" /etc/apt/sources.list || true; apt-get update || true; fi',
+        # ensure CA bundle present if using https mirror
+        'RUN if echo "${APT_MIRROR}" | grep -qi "^https://"; then apt-get update || true; apt-get install -y --no-install-recommends ca-certificates || true; fi',
+        # switch ubuntu archives to mirror; handle both http/https upstreams
+        'RUN if [ -n "$APT_MIRROR" ] && [ -f /etc/apt/sources.list ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|https://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g" /etc/apt/sources.list || true; sed -i "s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}|g; s|https://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}|g" /etc/apt/sources.list || true; if [ -n "${APT_INSECURE}" ]; then echo "Acquire::https::Verify-Peer false; Acquire::https::Verify-Host false;" > /etc/apt/apt.conf.d/99insecure-certs; fi; apt-get update || true; fi',
         "RUN if command -v npm >/dev/null 2>&1; then npm config set registry ${NPM_REGISTRY} || true; fi",
         'RUN if command -v python3 >/dev/null 2>&1; then python3 -m pip config set global.index-url ${PIP_INDEX_URL} || true; if [ -n "${PIP_TRUSTED_HOST}" ]; then python3 -m pip config set global.trusted-host ${PIP_TRUSTED_HOST} || true; fi; fi',
         "# [CN-MIRROR] end",

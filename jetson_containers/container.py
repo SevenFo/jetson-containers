@@ -145,7 +145,18 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         "    PIP_TRUSTED_HOST \\",
         "    NPM_REGISTRY \\",
         "    HF_ENDPOINT",
-        """RUN bash -euo pipefail <<'BASH'
+        """RUN APT_MIRROR="${APT_MIRROR}" \
+    APT_INSECURE="${APT_INSECURE}" \
+    APT_MIRROR_PORTS="${APT_MIRROR_PORTS}" \
+    GITHUB_PROXY="${GITHUB_PROXY}" \
+    GITHUB_PROXY_RAW="${GITHUB_PROXY_RAW}" \
+    GITHUB_GITCONFIG="${GITHUB_GITCONFIG}" \
+    GITHUB_SHIM="${GITHUB_SHIM}" \
+    PIP_INDEX_URL="${PIP_INDEX_URL}" \
+    PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
+    NPM_REGISTRY="${NPM_REGISTRY}" \
+    HF_ENDPOINT="${HF_ENDPOINT}" \
+    bash -euo pipefail <<'BASH'
 set -e
 if echo "${APT_MIRROR}" | grep -qi '^https://'; then apt-get update || true; apt-get install -y --no-install-recommends ca-certificates || true; fi
 if [ -n "${APT_MIRROR}" ]; then files="/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources"; ports_mirror="${APT_MIRROR_PORTS:-$APT_MIRROR}"; for f in $files; do if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|https://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g; s|https://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g" "$f" || true; fi; done; if [ -n "${APT_INSECURE}" ]; then echo "Acquire::https::Verify-Peer false; Acquire::https::Verify-Host false;" > /etc/apt/apt.conf.d/99insecure-certs; fi; apt-get update || true; fi

@@ -297,6 +297,10 @@ try:
             "GITHUB_GITCONFIG",
             os.environ.get("GITHUB_GITCONFIG", "0"),
         )
+        args.build_args.setdefault(
+            "GITHUB_SHIM",
+            os.environ.get("GITHUB_SHIM", "0"),
+        )
 
     if not args.multiple:
         build_container(**vars(args))

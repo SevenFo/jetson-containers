@@ -131,54 +131,118 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         # cannot find FROM, don't modify
         return dockerfile_src
 
-    # Ensure the GitHub shim installer is available in the Docker build context
-    # We place it under a hidden '.cn/ghproxy-shim' folder next to the Dockerfile
-    # so it can be referenced by a relative COPY from any package context.
-    dockerfile_dir = os.path.dirname(dockerfile_src)
-    shim_src = os.path.join(
-        get_repo_dir(), "scripts", "github-proxy-shim", "install.sh"
-    )
-    shim_rel_dir = os.path.join(dockerfile_dir, ".cn", "ghproxy-shim")
-    shim_dst = os.path.join(shim_rel_dir, "install.sh")
-    try:
-        if os.path.isfile(shim_src):
-            os.makedirs(shim_rel_dir, exist_ok=True)
-            # copy only if missing or source is newer
-            if not os.path.isfile(shim_dst) or os.path.getmtime(
-                shim_src
-            ) > os.path.getmtime(shim_dst):
-                shutil.copy2(shim_src, shim_dst)
-    except Exception:
-        # if copy fails, we still proceed - the COPY will fail only if GITHUB_SHIM=1 and install is attempted
-        pass
-
     mirror_block = [
         "# [CN-MIRROR] start",
-        "ARG APT_MIRROR",
-        "ARG APT_INSECURE",
-        "ARG APT_MIRROR_PORTS",
-        "ARG GITHUB_PROXY",
-        "ARG GITHUB_PROXY_RAW",
-        "ARG GITHUB_GITCONFIG=0",
-        "ARG GITHUB_SHIM=0",
-        "ARG PIP_INDEX_URL",
-        "ARG PIP_TRUSTED_HOST",
-        "ARG NPM_REGISTRY",
-        "ARG HF_ENDPOINT",
-        "ENV HF_ENDPOINT=${HF_ENDPOINT}",
-        "ENV HF_HUB_ENABLE_HF_TRANSFER=1",
-        # ensure CA bundle present if using https mirror
-        'RUN if echo "${APT_MIRROR}" | grep -qi "^https://"; then apt-get update || true; apt-get install -y --no-install-recommends ca-certificates || true; fi',
-        # switch ubuntu archives to mirror in all apt sources (list and deb822)
-        'RUN if [ -n "$APT_MIRROR" ]; then files="/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources"; ports_mirror="${APT_MIRROR_PORTS:-$APT_MIRROR}"; for f in $files; do if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|https://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g; s|https://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g" "$f" || true; fi; done; if [ -n "${APT_INSECURE}" ]; then echo "Acquire::https::Verify-Peer false; Acquire::https::Verify-Host false;" > /etc/apt/apt.conf.d/99insecure-certs; fi; apt-get update || true; fi',
-        # optionally configure git to rewrite github.com to proxy prefix for clones
-        'RUN if [ "${GITHUB_GITCONFIG}" = "1" ] && [ -n "${GITHUB_PROXY}" ]; then git config --global url."${GITHUB_PROXY}https://github.com/".insteadof https://github.com/ || true; git config --global url."${GITHUB_PROXY}https://codeload.github.com/".insteadof https://codeload.github.com/ || true; fi',
-        # copy and install the shim from repo when enabled
-        "COPY .cn/ghproxy-shim/install.sh /tmp/ghproxy-shim-install.sh",
-        'RUN if [ "${GITHUB_SHIM}" = "1" ]; then chmod +x /tmp/ghproxy-shim-install.sh && /tmp/ghproxy-shim-install.sh && rm -f /tmp/ghproxy-shim-install.sh; fi',
-        "ENV PATH=/opt/ghproxy-shim:${PATH}",
-        "RUN if command -v npm >/dev/null 2>&1; then npm config set registry ${NPM_REGISTRY} || true; fi",
-        'RUN if command -v python3 >/dev/null 2>&1; then python3 -m pip config set global.index-url ${PIP_INDEX_URL} || true; if [ -n "${PIP_TRUSTED_HOST}" ]; then python3 -m pip config set global.trusted-host ${PIP_TRUSTED_HOST} || true; fi; fi',
+        # combine ARG into a single multi-line instruction for cleaner history
+        "ARG APT_MIRROR \\",
+        "    APT_INSECURE \\",
+        "    APT_MIRROR_PORTS \\",
+        "    GITHUB_PROXY \\",
+        "    GITHUB_PROXY_RAW \\",
+        "    GITHUB_GITCONFIG=0 \\",
+        "    GITHUB_SHIM=0 \\",
+        "    PIP_INDEX_URL \\",
+        "    PIP_TRUSTED_HOST \\",
+        "    NPM_REGISTRY \\",
+        "    HF_ENDPOINT",
+        """RUN /bin/bash -lc 'set -e
+if echo "${APT_MIRROR}" | grep -qi '^https://'; then apt-get update || true; apt-get install -y --no-install-recommends ca-certificates || true; fi
+if [ -n "${APT_MIRROR}" ]; then files="/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources"; ports_mirror="${APT_MIRROR_PORTS:-$APT_MIRROR}"; for f in $files; do if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|https://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g; s|https://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g" "$f" || true; fi; done; if [ -n "${APT_INSECURE}" ]; then echo "Acquire::https::Verify-Peer false; Acquire::https::Verify-Host false;" > /etc/apt/apt.conf.d/99insecure-certs; fi; apt-get update || true; fi
+if [ "${GITHUB_GITCONFIG}" = "1" ] && [ -n "${GITHUB_PROXY}" ]; then git config --global url."${GITHUB_PROXY}https://github.com/".insteadof https://github.com/ || true; git config --global url."${GITHUB_PROXY}https://codeload.github.com/".insteadof https://codeload.github.com/ || true; fi
+if [ "${GITHUB_SHIM}" = "1" ]; then
+    install -d /usr/local/bin
+    cat > /usr/local/bin/curl <<'EOF_CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+normalize(){ local u="$1"; [[ "$u" == http://* ]] && u="https://${u:7}"; echo "$u"; }
+rewrite(){ local u="$1"; if [[ "$u" =~ ^https://github.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$ ]]; then u="https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}/${BASH_REMATCH[4]}"; fi
+case "$u" in
+    http://raw.githubusercontent.com/*|https://raw.githubusercontent.com/*) echo "${GITHUB_PROXY_RAW}$(normalize "$u")";;
+    http://gist.githubusercontent.com/*|https://gist.githubusercontent.com/*) echo "${GITHUB_PROXY_RAW}$(normalize "$u")";;
+    http://github.com/*|https://github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+    http://codeload.github.com/*|https://codeload.github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+    http://objects.githubusercontent.com/*|https://objects.githubusercontent.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+    http://api.github.com/*|https://api.github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+    *) echo "$u";;
+esac
+}
+args=()
+for a in "$@"; do
+    if [[ "$a" == http*github.com* || "$a" == http*raw.githubusercontent.com* || "$a" == http*gist.githubusercontent.com* || "$a" == http*api.github.com* || "$a" == http*codeload.github.com* || "$a" == http*objects.githubusercontent.com* ]]; then
+        a="$(rewrite "$a")"
+    fi
+    args+=("$a")
+done
+exec /usr/bin/curl "${args[@]}"
+EOF_CURL
+    chmod +x /usr/local/bin/curl
+    cat > /usr/local/bin/wget <<'EOF_WGET'
+#!/usr/bin/env bash
+set -euo pipefail
+normalize(){ local u="$1"; [[ "$u" == http://* ]] && u="https://${u:7}"; echo "$u"; }
+rewrite(){ local u="$1"; if [[ "$u" =~ ^https://github.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$ ]]; then u="https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}/${BASH_REMATCH[4]}"; fi
+case "$u" in
+    http://raw.githubusercontent.com/*|https://raw.githubusercontent.com/*) echo "${GITHUB_PROXY_RAW}$(normalize "$u")";;
+    http://gist.githubusercontent.com/*|https://gist.githubusercontent.com/*) echo "${GITHUB_PROXY_RAW}$(normalize "$u")";;
+    http://github.com/*|https://github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+    http://codeload.github.com/*|https://codeload.github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+    http://objects.githubusercontent.com/*|https://objects.githubusercontent.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+    http://api.github.com/*|https://api.github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+    *) echo "$u";;
+esac
+}
+args=()
+for a in "$@"; do
+    if [[ "$a" == http*github.com* || "$a" == http*raw.githubusercontent.com* || "$a" == http*gist.githubusercontent.com* || "$a" == http*api.github.com* || "$a" == http*codeload.github.com* || "$a" == http*objects.githubusercontent.com* ]]; then
+        a="$(rewrite "$a")"
+    fi
+    args+=("$a")
+done
+exec /usr/bin/wget "${args[@]}"
+EOF_WGET
+    chmod +x /usr/local/bin/wget
+    cat > /usr/local/bin/git <<'EOF_GIT'
+#!/usr/bin/env bash
+set -euo pipefail
+normalize(){ local u="$1"; [[ "$u" == http://* ]] && u="https://${u:7}"; echo "$u"; }
+convert(){ local u="$1";
+    case "$u" in
+        git@github.com:*) u="https://github.com/${u#git@github.com:}";;
+        ssh://git@github.com/*) u="https://github.com/${u#ssh://git@github.com/}";;
+        git://github.com/*) u="https://github.com/${u#git://github.com/}";;
+    esac
+    case "$u" in
+        http://github.com/*|https://github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+        http://codeload.github.com/*|https://codeload.github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+        http://objects.githubusercontent.com/*|https://objects.githubusercontent.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+        http://api.github.com/*|https://api.github.com/*) echo "${GITHUB_PROXY}$(normalize "$u")";;
+        *) echo "$u";;
+    esac
+}
+if [[ "${1:-}" == "clone" ]]; then
+    newargs=()
+    for a in "$@"; do
+        if [[ "$a" == git@github.com:* || "$a" == ssh://git@github.com/* || "$a" == git://github.com/* || "$a" == http://github.com/* || "$a" == https://github.com/* || "$a" == http://codeload.github.com/* || "$a" == https://codeload.github.com/* ]]; then
+            a="$(convert "$a")"
+        fi
+        newargs+=("$a")
+    done
+    exec /usr/bin/git "${newargs[@]}"
+else
+    exec /usr/bin/git "$@"
+fi
+EOF_GIT
+    chmod +x /usr/local/bin/git
+fi
+if command -v npm >/dev/null 2>&1 && [ -n "${NPM_REGISTRY}" ]; then npm config set registry ${NPM_REGISTRY} || true; fi
+if [ -n "${PIP_INDEX_URL}" ]; then
+    if command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+        python3 -m pip config set global.index-url ${PIP_INDEX_URL} || true
+        if [ -n "${PIP_TRUSTED_HOST}" ]; then python3 -m pip config set global.trusted-host ${PIP_TRUSTED_HOST} || true; fi
+    else
+        mkdir -p /etc && { echo "[global]"; echo "index-url = ${PIP_INDEX_URL}"; if [ -n "${PIP_TRUSTED_HOST}" ]; then echo "trusted-host = ${PIP_TRUSTED_HOST}"; fi; } > /etc/pip.conf
+    fi
+fi'""",
         "# [CN-MIRROR] end",
     ]
 

@@ -144,6 +144,7 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         GITHUB_PROXY_RAW="${GITHUB_PROXY_RAW:-}"
         GITHUB_GITCONFIG="${GITHUB_GITCONFIG:-0}"
         GITHUB_SHIM="${GITHUB_SHIM:-0}"
+        PPA_PROXY="${PPA_PROXY:-}"
         PIP_INDEX_URL="${PIP_INDEX_URL:-}"
         PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST:-}"
         NPM_REGISTRY="${NPM_REGISTRY:-}"
@@ -190,6 +191,15 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
             fi
 
             apt-get update || true
+        fi
+
+        if [ -n "${PPA_PROXY}" ]; then
+            files=(/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources)
+            for f in "${files[@]}"; do
+                if [ -f "$f" ]; then
+                    sed -i "s|http://ppa.launchpadcontent.net|${PPA_PROXY}|g; s|https://ppa.launchpadcontent.net|${PPA_PROXY}|g; s|http://ppa.launchpad.net|${PPA_PROXY}|g; s|https://ppa.launchpad.net|${PPA_PROXY}|g" "$f" || true
+                fi
+            done
         fi
 
         if [ "${GITHUB_GITCONFIG}" = "1" ] && [ -n "${GITHUB_PROXY}" ]; then
@@ -308,6 +318,7 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         "    GITHUB_PROXY_RAW \\",
         "    GITHUB_GITCONFIG=0 \\",
         "    GITHUB_SHIM=0 \\",
+        "    PPA_PROXY \\",
         "    PIP_INDEX_URL \\",
         "    PIP_TRUSTED_HOST \\",
         "    NPM_REGISTRY \\",

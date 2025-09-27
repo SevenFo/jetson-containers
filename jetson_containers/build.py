@@ -267,6 +267,10 @@ try:
         )
         args.build_args.setdefault("APT_INSECURE", os.environ.get("APT_INSECURE", ""))
         args.build_args.setdefault(
+            "PPA_PROXY",
+            os.environ.get("PPA_PROXY", "https://launchpad.proxy.ustclug.org"),
+        )
+        args.build_args.setdefault(
             "PIP_INDEX_URL",
             os.environ.get("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple"),
         )

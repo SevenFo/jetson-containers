@@ -145,7 +145,8 @@ def _inject_cn_mirrors(dockerfile_src: str) -> str:
         "    PIP_TRUSTED_HOST \\",
         "    NPM_REGISTRY \\",
         "    HF_ENDPOINT",
-        """RUN /bin/bash -lc 'set -e
+        """RUN bash -euo pipefail <<'BASH'
+set -e
 if echo "${APT_MIRROR}" | grep -qi '^https://'; then apt-get update || true; apt-get install -y --no-install-recommends ca-certificates || true; fi
 if [ -n "${APT_MIRROR}" ]; then files="/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources"; ports_mirror="${APT_MIRROR_PORTS:-$APT_MIRROR}"; for f in $files; do if [ -f "$f" ]; then sed -i "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|https://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g; s|http://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g; s|https://ports.ubuntu.com/ubuntu-ports|${ports_mirror}|g" "$f" || true; fi; done; if [ -n "${APT_INSECURE}" ]; then echo "Acquire::https::Verify-Peer false; Acquire::https::Verify-Host false;" > /etc/apt/apt.conf.d/99insecure-certs; fi; apt-get update || true; fi
 if [ "${GITHUB_GITCONFIG}" = "1" ] && [ -n "${GITHUB_PROXY}" ]; then git config --global url."${GITHUB_PROXY}https://github.com/".insteadof https://github.com/ || true; git config --global url."${GITHUB_PROXY}https://codeload.github.com/".insteadof https://codeload.github.com/ || true; fi
@@ -242,7 +243,8 @@ if [ -n "${PIP_INDEX_URL}" ]; then
     else
         mkdir -p /etc && { echo "[global]"; echo "index-url = ${PIP_INDEX_URL}"; if [ -n "${PIP_TRUSTED_HOST}" ]; then echo "trusted-host = ${PIP_TRUSTED_HOST}"; fi; } > /etc/pip.conf
     fi
-fi'""",
+fi
+BASH""",
         "# [CN-MIRROR] end",
     ]
 

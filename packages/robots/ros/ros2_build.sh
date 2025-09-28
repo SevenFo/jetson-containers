@@ -55,8 +55,7 @@ apt-get install -y --no-install-recommends \
 		libacl1-dev \
 		libssl-dev \
 		libxaw7-dev \
-		libfreetype-dev \
-		rti-connext-*-ros
+		libfreetype-dev
 
 # TODO - track down rest of the RMW middleware options
 # https://docs.ros.org/en/humble/Installation/DDS-Implementations/Working-with-RTI-Connext-DDS.html

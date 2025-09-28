@@ -3,7 +3,7 @@ set -e
 echo "testing NanoOWL..."
 
 cd /opt/nanoowl/examples
-
+cp /test/owl_predict.py .
 python3 owl_predict.py \
     --prompt="[an owl, a glove]" \
     --threshold=0.1 \

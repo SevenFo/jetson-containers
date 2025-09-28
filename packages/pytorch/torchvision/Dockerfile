@@ -9,7 +9,7 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG TORCHVISION_VERSION \
-    FORCE_BUILD=off
+    FORCE_BUILD=on # https://github.com/dusty-nv/jetson-containers/issues/1412
 
 COPY build.sh install.sh /tmp/torchvision/
 
